@@ -1,16 +1,3 @@
-"""
-Quadruped Leg Visualizer — PyQt6 + pyqtgraph OpenGL, with IK and body pose.
-
-Run:
-    pip install pyqt6 pyqtgraph PyOpenGL numpy
-    python quadruped_gui.py
-
-Layout:
-  * Top-left   : hardware-accelerated 3D view with a corner orientation gizmo.
-  * Right panel: 2x2 joint-angle blocks (FK) + body pose. Compact, no scroll.
-  * Bottom strip: link lengths | inverse kinematics | foot positions | controls.
-"""
-
 import os
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt6")
 
