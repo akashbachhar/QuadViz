@@ -1,3 +1,16 @@
+"""
+Quadruped Leg Visualizer — PyQt6 + pyqtgraph OpenGL, with IK and body pose.
+
+Run:
+    pip install pyqt6 pyqtgraph PyOpenGL numpy
+    python quadruped_gui.py
+
+Layout:
+  * Top-left   : hardware-accelerated 3D view with a corner orientation gizmo.
+  * Right panel: 2x2 joint-angle blocks (FK) + body pose. Compact, no scroll.
+  * Bottom strip: link lengths | inverse kinematics | foot positions | controls.
+"""
+
 import os
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt6")
 
@@ -137,7 +150,7 @@ def trot(t, leg, period=0.6, A_hfe=25, A_kfe=35, base=(8, 40, -80)):
 # GUI constants
 # ----------------------------------------------------------------------
 JOINTS = ["haa", "hfe", "kfe"]
-JOINT_LABEL = {"haa": "Hip abduction", "hfe": "Hip flexion", "kfe": "Knee"}
+JOINT_LABEL = {"haa": "Hip abd.", "hfe": "Hip flex", "kfe": "Knee"}
 RANGES = {"haa": (-60, 60), "hfe": (-30, 120), "kfe": (-150, 30)}
 DEFAULT = {"haa": 8, "hfe": 40, "kfe": -80}
 LEG_ORDER = ["FL", "FR", "BL", "BR"]
@@ -164,8 +177,8 @@ POSE = [("roll", -30, 30, 0.0, "\u00b0"),
 class RobotView(gl.GLViewWidget):
     """Main 3D view plus a screen-corner orientation gizmo: x/y/z arrows that
     mirror the camera rotation, like a CAD viewer. The gizmo is a small second
-    GLViewWidget overlaid in the bottom-left, with its camera slaved to this
-    view's azimuth/elevation."""
+    GLViewWidget overlaid in the bottom-left, with a transparent background and
+    its camera slaved to this view's azimuth/elevation."""
 
     GZ = 120  # gizmo size in px
 
@@ -235,7 +248,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Quadruped Visualizer — OpenGL · FK · IK · body pose")
-        self.resize(1340, 960)
+        self.resize(1340, 900)
 
         self.robot = Quadruped()
         self._t = 0.0
@@ -246,46 +259,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
 
-        # ============ TOP ROW: view (left) + side controls (right) ============
+        self.pose_ctrl, self.pose_lab = {}, {}
+        self.length_ctrl = {}
+        self.sliders, self.value_labels = {}, {}
+        self.coord_boxes, self.ik_status = {}, {}
+
+        # ============ TOP ROW: view (left) + compact side panel (right) =======
         top = QtWidgets.QHBoxLayout()
         root.addLayout(top, stretch=1)
 
-        # ---- OpenGL 3D view (top-left) ----
         self.view = RobotView()
         self.view.setBackgroundColor(pg.mkColor("#0e1116"))
         self.view.setCameraPosition(pos=pg.Vector(0, 0, 0.35),
                                     distance=3.0, elevation=18, azimuth=-60)
         top.addWidget(self.view, stretch=3)
 
-        # ---- right side panel (scrollable) ----
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMaximumWidth(480)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        top.addWidget(scroll, stretch=2)
-
         side = QtWidgets.QWidget()
-        scroll.setWidget(side)
+        side.setMaximumWidth(560)
         sv = QtWidgets.QVBoxLayout(side)
-        sv.setSpacing(10)
+        sv.setSpacing(8)
+        top.addWidget(side, stretch=2)
 
-        self.pose_ctrl, self.pose_lab = {}, {}
-        self.length_ctrl = {}
-        self.sliders, self.value_labels = {}, {}
-        self.coord_boxes, self.ik_status = {}, {}
-
-        for leg in LEG_ORDER:
-            sv.addWidget(self._slider_block(leg))
-        sv.addWidget(self._ik_block())
+        jgrid = QtWidgets.QGridLayout()      # 2x2 joint-angle blocks
+        jgrid.setSpacing(8)
+        for i, leg in enumerate(LEG_ORDER):
+            jgrid.addWidget(self._slider_block(leg), i // 2, i % 2)
+        sv.addLayout(jgrid)
         sv.addWidget(self._pose_block())
         sv.addStretch(1)
 
-        # ============ BOTTOM STRIP: lengths + feet + buttons ============
+        # ============ BOTTOM STRIP: lengths | IK | feet | controls ============
         bottom = QtWidgets.QHBoxLayout()
         bottom.setSpacing(10)
         root.addLayout(bottom)
 
         bottom.addWidget(self._length_block())
+        bottom.addWidget(self._ik_block())
 
         self.foot_card = QtWidgets.QLabel()
         self.foot_card.setTextFormat(QtCore.Qt.TextFormat.RichText)
@@ -320,15 +329,16 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QGroupBox("Body pose")
         box.setStyleSheet("QGroupBox{font-weight:bold;}")
         v = QtWidgets.QVBoxLayout(box)
+        v.setSpacing(4)
         for name, lo, hi, default, unit in POSE:
             row = QtWidgets.QHBoxLayout()
-            lab = QtWidgets.QLabel(name.capitalize()); lab.setMinimumWidth(64)
+            lab = QtWidgets.QLabel(name.capitalize()); lab.setMinimumWidth(56)
             s = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
             s.setRange(0, 1000)
             s.setProperty("lo", lo); s.setProperty("hi", hi); s.setProperty("unit", unit)
             s.setValue(int(round((default - lo) / (hi - lo) * 1000)))
             s.valueChanged.connect(self._on_pose)
-            val = QtWidgets.QLabel(); val.setMinimumWidth(58)
+            val = QtWidgets.QLabel(); val.setMinimumWidth(56)
             row.addWidget(lab); row.addWidget(s, 1); row.addWidget(val)
             self.pose_ctrl[name] = s
             self.pose_lab[name] = val
@@ -352,31 +362,35 @@ class MainWindow(QtWidgets.QMainWindow):
     def _length_block(self):
         box = QtWidgets.QGroupBox("Link lengths")
         box.setStyleSheet("QGroupBox{font-weight:bold;}")
-        row = QtWidgets.QHBoxLayout(box)
+        v = QtWidgets.QVBoxLayout(box)
+        v.setSpacing(4)
         defaults = self.robot.legs["FL"].L
         for i, label in enumerate(LINK_LABEL):
-            row.addWidget(QtWidgets.QLabel(label))
+            row = QtWidgets.QHBoxLayout()
+            lab = QtWidgets.QLabel(label); lab.setMinimumWidth(64)
             sb = QtWidgets.QDoubleSpinBox()
             sb.setRange(0.05, 1.0); sb.setSingleStep(0.01); sb.setDecimals(2)
             sb.setValue(defaults[i])
             sb.valueChanged.connect(self._on_length)
             self.length_ctrl[i] = sb
-            row.addWidget(sb)
+            row.addWidget(lab); row.addWidget(sb)
+            v.addLayout(row)
         return box
 
     def _slider_block(self, leg):
-        box = QtWidgets.QGroupBox(f"{leg}  \u2014  joint angles")
+        box = QtWidgets.QGroupBox(leg)
         color = Quadruped.LEGS[leg][2]
         box.setStyleSheet(f"QGroupBox{{font-weight:bold; color:{color};}}")
         v = QtWidgets.QVBoxLayout(box)
+        v.setSpacing(4)
         for j in JOINTS:
             row = QtWidgets.QHBoxLayout()
-            name = QtWidgets.QLabel(JOINT_LABEL[j]); name.setMinimumWidth(95)
+            name = QtWidgets.QLabel(JOINT_LABEL[j]); name.setMinimumWidth(58)
             lo, hi = RANGES[j]
             s = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
             s.setRange(lo, hi); s.setValue(DEFAULT[j])
             s.valueChanged.connect(self._on_slider)
-            val = QtWidgets.QLabel(f"{DEFAULT[j]:>4}\u00b0"); val.setMinimumWidth(40)
+            val = QtWidgets.QLabel(f"{DEFAULT[j]:>4}\u00b0"); val.setMinimumWidth(38)
             row.addWidget(name); row.addWidget(s, 1); row.addWidget(val)
             self.sliders[(leg, j)] = s
             self.value_labels[(leg, j)] = val
@@ -384,12 +398,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return box
 
     def _ik_block(self):
-        box = QtWidgets.QGroupBox("Inverse kinematics  \u2014  type a world foot target")
+        box = QtWidgets.QGroupBox("Inverse kinematics  \u2014  world foot target")
         box.setStyleSheet("QGroupBox{font-weight:bold;}")
         grid = QtWidgets.QGridLayout(box)
-        grid.setHorizontalSpacing(6)
+        grid.setHorizontalSpacing(6); grid.setVerticalSpacing(4)
         for c, head in enumerate(["", "x", "y", "z", "", ""]):
-            lab = QtWidgets.QLabel(head); lab.setStyleSheet("font-weight:bold; color:#555;")
+            lab = QtWidgets.QLabel(head); lab.setStyleSheet("font-weight:bold; color:#777;")
             grid.addWidget(lab, 0, c)
         for r, leg in enumerate(LEG_ORDER, start=1):
             color = Quadruped.LEGS[leg][2]
@@ -398,13 +412,13 @@ class MainWindow(QtWidgets.QMainWindow):
             for c, ax in enumerate(AXES, start=1):
                 sb = QtWidgets.QDoubleSpinBox()
                 sb.setRange(-3.0, 3.0); sb.setSingleStep(0.02); sb.setDecimals(2)
-                sb.setMinimumWidth(64)
+                sb.setMinimumWidth(60)
                 self.coord_boxes[(leg, ax)] = sb
                 grid.addWidget(sb, r, c)
-            go = QtWidgets.QPushButton("Go"); go.setMaximumWidth(40)
+            go = QtWidgets.QPushButton("Go"); go.setMaximumWidth(38)
             go.clicked.connect(lambda _, lg=leg: self._go(lg))
             grid.addWidget(go, r, 4)
-            st = QtWidgets.QLabel(""); st.setMinimumWidth(96)
+            st = QtWidgets.QLabel(""); st.setMinimumWidth(92)
             self.ik_status[leg] = st
             grid.addWidget(st, r, 5)
         return box
@@ -560,7 +574,6 @@ class MainWindow(QtWidgets.QMainWindow):
             lab.setText("<span style='color:#c0392b'>&#10007; out of reach</span>")
 
     def _on_slider_silent(self):
-        # update labels + plot without re-syncing pins (used after IK Go)
         for (leg, j), s in self.sliders.items():
             self.value_labels[(leg, j)].setText(f"{s.value():>4}\u00b0")
         self._refresh()
